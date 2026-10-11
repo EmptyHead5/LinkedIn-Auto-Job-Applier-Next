@@ -22,3 +22,58 @@ apikeys.py
 user_config.json
 .bot_run.log
 .bot_run.pid
+# Local/private files
+.venv/
+user_config.json
+.env
+logs/
+__pycache__/
+*.pyc
+linkedin_jobs_debug.html
+linkedin_jobs_debug.png
+runAiBot_*_backup.py
+
+# macOS
+.DS_Store
+
+# Runtime files
+*.pid
+.bot_run*
+
+# Debug files
+linkedin_jobs_debug*.html
+linkedin_jobs_debug*.png
+
+# Local backups
+*.backup
+runAiBot_*_backup.py
+
+# Personal information
+user_config.json
+.env
+resumes/
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Runtime files
+*.pid
+.bot_run*
+
+# Debug files
+linkedin_jobs_debug*.html
+linkedin_jobs_debug*.png
+
+# Local backups
+*.backup
+runAiBot_*_backup.py
+runAiBot_broken.py
+
+# Logs and generated application history
+logs/
+all excels/

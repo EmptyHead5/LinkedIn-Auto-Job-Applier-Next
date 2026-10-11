@@ -272,18 +272,42 @@ def apply_filters() -> None:
     '''
     set_search_location()
 
+    # LinkedIn's 2026 Jobs UI no longer needs the All filters modal when
+    # nothing is configured. Avoid opening it in that case.
+    no_filters = (
+        not sort_by
+        and not date_posted
+        and not salary
+        and not easy_apply_only
+        and not experience_level
+        and not companies
+        and not job_type
+        and not on_site
+        and not location
+        and not industry
+        and not job_function
+        and not job_titles
+        and not under_10_applicants
+        and not in_your_network
+        and not fair_chance_employer
+        and not benefits
+        and not commitments
+    )
+    if no_filters:
+        print_lg("No search filters configured. Using LinkedIn search results directly.")
+        buffer(3)
+        return
+
     try:
         recommended_wait = recommended_filter_wait(click_gap)
-
-        # element_to_be_clickable, not presence: the filters button renders before it's usable.
-        wait.until(EC.element_to_be_clickable((By.XPATH, '//button[normalize-space()="All filters"]'))).click()
+        wait.until(EC.element_to_be_clickable((By.XPATH, '//button[.//span[normalize-space()="All filters"]]'))).click()
         buffer(recommended_wait)
 
         wait_span_click(driver, sort_by)
         wait_span_click(driver, date_posted)
         buffer(recommended_wait)
 
-        multi_sel_noWait(driver, experience_level) 
+        multi_sel_noWait(driver, experience_level)
         multi_sel_noWait(driver, companies, actions)
         if experience_level or companies: buffer(recommended_wait)
 
@@ -292,7 +316,6 @@ def apply_filters() -> None:
         if job_type or on_site: buffer(recommended_wait)
 
         if easy_apply_only: boolean_button_click(driver, actions, "Easy Apply")
-        
         multi_sel_noWait(driver, location)
         multi_sel_noWait(driver, industry)
         if location or industry: buffer(recommended_wait)
@@ -302,30 +325,32 @@ def apply_filters() -> None:
         if job_function or job_titles: buffer(recommended_wait)
 
         if under_10_applicants: boolean_button_click(driver, actions, "Under 10 applicants")
-        if in_your_network: boolean_button_click(driver, actions, "In your network")
+        if in_your_network: boolean_button_click(driver, actions, "In my network")
         if fair_chance_employer: boolean_button_click(driver, actions, "Fair Chance Employer")
 
         wait_span_click(driver, salary)
         buffer(recommended_wait)
-        
         multi_sel_noWait(driver, benefits)
         multi_sel_noWait(driver, commitments)
         if benefits or commitments: buffer(recommended_wait)
 
-        show_results_button: WebElement = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "apply current filters to show")]')))
+        # Old UI used an aria-label containing "apply current filters to show".
+        # Keep it as the first choice, with visible-text fallbacks for newer renders.
+        show_results_button = wait.until(EC.element_to_be_clickable((By.XPATH,
+            '//button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "apply current filters to show") '
+            'or contains(normalize-space(.), "Show results") '
+            'or (contains(normalize-space(.), "Show") and contains(normalize-space(.), "result"))]')))
         show_results_button.click()
-        buffer(3)   # let the results reload settle before anything reads the list
+        buffer(3)
 
         global pause_after_filters
-        if pause_after_filters and "Turn off Pause after search" == pyautogui.confirm("These are your configured search results and filter. It is safe to change them while this dialog is open, any changes later could result in errors and skipping this search run.", "Please check your results", ["Turn off Pause after search", "Look's good, Continue"]):
+        if pause_after_filters and "Turn off Pause after search" == pyautogui.confirm(
+            "These are your configured search results and filter. It is safe to change them while this dialog is open, any changes later could result in errors and skipping this search run.",
+            "Please check your results", ["Turn off Pause after search", "Look's good, Continue"]):
             pause_after_filters = False
-
     except Exception as e:
         logger.warning("Setting the preferences failed!")
         pyautogui.confirm(f"Faced error while applying filters. Please make sure correct filters are selected, click on show results and click on any button of this dialog, I know it sucks. Can't turn off Pause after search when error occurs! ERROR: {e}", ["Doesn't look good, but Continue XD", "Look's good, Continue"])
-        # print_lg(e)
-
-
 
 def get_page_info() -> tuple[WebElement | None, int | None]:
     '''
@@ -345,60 +370,96 @@ def get_page_info() -> tuple[WebElement | None, int | None]:
 
 
 
+# LinkedIn 2026 Flagship Jobs UI: job cards no longer use <li data-occludable-job-id>.
+# The stable semantic hook in the captured UI is componentkey="job-card-component-ref-<job id>".
+job_card_xpath = '//*[@role="button" and starts-with(@componentkey, "job-card-component-ref-")]'
+
+def get_job_id_from_card(job: WebElement) -> str:
+    component_key = job.get_dom_attribute("componentkey") or ""
+    if component_key.startswith("job-card-component-ref-"):
+        return component_key.removeprefix("job-card-component-ref-")
+    legacy_id = job.get_dom_attribute("data-occludable-job-id")
+    return legacy_id or ""
+
+
 def get_job_main_details(job: WebElement, blacklisted_companies: set, rejected_jobs: set) -> tuple[str, str, str, str, str, bool]:
-    '''
-    # Function to get job main details.
-    Returns a tuple of (job_id, title, company, work_location, work_style, skip)
-    * job_id: Job ID
-    * title: Job title
-    * company: Company name
-    * work_location: Work location of this job
-    * work_style: Work style of this job (Remote, On-site, Hybrid)
-    * skip: A boolean flag to skip this job
-    '''
+    """Read a job card from LinkedIn's 2026 Flagship UI, with legacy fallback."""
     skip = False
-    # Every class on a job card that carried data is now a rotating random string, so anchor
-    # on the artdeco lockup structure instead. The title link is no longer the card's first
-    # <a> in every layout either, so address it through the lockup title too.
-    job_details_button = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a")
-    scroll_to_view(driver, job_details_button, True)
-    job_id = job.get_dom_attribute('data-occludable-job-id')
-    # aria-label is the whole title; .text of the link also drags in the verified-badge node,
-    # and slicing at the first "\n" silently ate the last character when there wasn't one.
-    title = job_details_button.get_dom_attribute('aria-label') or job_details_button.text
-    title = title.split("\n")[0].removesuffix(" with verification").strip()
-    # The subtitle used to read "Company · Location (Style)". It is now the company alone,
-    # and the location moved into its own metadata list.
-    company = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__subtitle')]").text.strip()
-    location_ele = try_xp(job, ".//ul[contains(@class,'job-card-container__metadata-wrapper')]//span[@dir='ltr']", False)
-    work_location = location_ele.text.strip() if location_ele else "Unknown"
+    job_id = get_job_id_from_card(job)
+
+    if (job.get_dom_attribute("componentkey") or "").startswith("job-card-component-ref-"):
+        # 2026 Flagship: random CSS classes, but the card's visible <p> rows are semantic:
+        # title, company, location, followed by salary/status metadata.
+        visible_rows = []
+        for el in job.find_elements(By.XPATH, './/p'):
+            try:
+                text = el.text.strip()
+                if text and el.is_displayed() and text not in visible_rows:
+                    visible_rows.append(text)
+            except Exception:
+                pass
+
+        title = "Unknown"
+        company = "Unknown"
+        work_location = "Unknown"
+        if visible_rows:
+            title = re.sub(r'^Selected,\s*', '', visible_rows[0])
+            title = re.sub(r'\s*\(Verified job\)\s*$', '', title).strip()
+        if len(visible_rows) > 1:
+            company = visible_rows[1].strip()
+        if len(visible_rows) > 2:
+            work_location = visible_rows[2].strip()
+
+        # Fallback for cards where the title is rendered in spans rather than the first p.
+        if title == "Unknown":
+            title_ele = try_xp(job, './/span[@aria-hidden="true" and normalize-space()]', False)
+            if title_ele:
+                title = re.sub(r'\s*\(Verified job\)\s*$', '', title_ele.text.strip()).strip()
+        job_click_target = job
+    else:
+        job_click_target = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a")
+        title = job_click_target.get_dom_attribute('aria-label') or job_click_target.text
+        title = title.split("\n")[0].removesuffix(" with verification").strip()
+        company = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__subtitle')]").text.strip()
+        location_ele = try_xp(job, ".//ul[contains(@class,'job-card-container__metadata-wrapper')]//span[@dir='ltr']", False)
+        work_location = location_ele.text.strip() if location_ele else "Unknown"
+
     work_style = "Unknown"
     if '(' in work_location and ')' in work_location:
         work_style = work_location[work_location.rfind('(')+1:work_location.rfind(')')]
         work_location = work_location[:work_location.rfind('(')].strip()
-    
-    # Skip if previously rejected due to blacklist or already applied
+
     if company in blacklisted_companies:
         print_lg(f'Skipping "{title} | {company}" job (Blacklisted Company). Job ID: {job_id}!')
         skip = True
-    elif job_id in rejected_jobs: 
+    elif job_id in rejected_jobs:
         print_lg(f'Skipping previously rejected "{title} | {company}" job. Job ID: {job_id}!')
         skip = True
-    try:
-        if job.find_element(By.CLASS_NAME, "job-card-container__footer-job-state").text == "Applied":
-            skip = True
-            print_lg(f'Already applied to "{title} | {company}" job. Job ID: {job_id}!')
-    except: pass
-    try: 
-        if not skip: job_details_button.click()
-    except Exception as e:
-        logger.warning('Failed to click "%s | %s" job on details button. Job ID: %s!', title, company, job_id)
-        # print_lg(e)
-        discard_job()
-        job_details_button.click() # To pass the error outside
-    buffer(click_gap)
-    return (job_id,title,company,work_location,work_style,skip)
 
+    try:
+        if job.find_element(By.CLASS_NAME, "job-card-container__footer-job-state").text == "Applied": skip = True
+    except Exception:
+        if any(t.strip() == "Applied" for t in job.text.splitlines()): skip = True
+    if skip:
+        return (job_id, title, company, work_location, work_style, skip)
+
+    scroll_to_view(driver, job_click_target, True)
+    try:
+        job_click_target.click()
+    except ElementClickInterceptedException:
+        # A stale Easy Apply dialog from the previous job can cover the results list.
+        discard_job()
+        scroll_to_view(driver, job_click_target, True)
+        job_click_target.click()
+
+    if job_id:
+        try:
+            WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.XPATH, f'//*[@componentkey="JobDetails_AboutTheJob_{job_id}"]')))
+        except Exception:
+            buffer(max(click_gap, 2))
+    else:
+        buffer(click_gap)
+    return (job_id, title, company, work_location, work_style, skip)
 
 def find_bad_word(text: str, words: list[str]) -> str | None:
     '''
@@ -525,14 +586,35 @@ def match_answer_to_option(answer: str | None, option_texts: list[str]) -> int |
 
 # Function to check for Blacklisted words in About Company
 def check_blacklist(rejected_jobs: set, job_id: str, company: str, blacklisted_companies: set) -> tuple[set, set, WebElement] | ValueError:
-    jobs_top_card = try_find_by_classes(driver, ["job-details-jobs-unified-top-card__primary-description-container","job-details-jobs-unified-top-card__primary-description","jobs-unified-top-card__primary-description","jobs-details__main-content"])
-    about_company_org = find_by_class(driver, "jobs-company__box")
-    scroll_to_view(driver, about_company_org)
-    about_company_org = about_company_org.text
-    about_company = about_company_org.lower()
+    """Check company text when available; absence of the section is never a blacklist hit."""
+    jobs_top_card = None
+    about_company_org = None
+
+    if job_id:
+        try:
+            new_about = WebDriverWait(driver, 5).until(EC.presence_of_element_located(
+                (By.XPATH, f'//*[@componentkey="JobDetails_AboutTheCompany_{job_id}"]')))
+            about_company_org = new_about.text.strip()
+            jobs_top_card = new_about
+        except Exception:
+            pass
+
+    if not about_company_org:
+        try:
+            jobs_top_card = try_find_by_classes(driver, ["job-details-jobs-unified-top-card__primary-description-container","job-details-jobs-unified-top-card__primary-description","jobs-unified-top-card__primary-description","jobs-details__main-content"])
+        except Exception:
+            jobs_top_card = None
+        about_company_ele = try_xp(driver, '//*[contains(@class,"jobs-company__box")]', False)
+        if about_company_ele:
+            about_company_org = about_company_ele.text.strip()
+
+    if not about_company_org:
+        print_lg(f'About Company section unavailable for "{company}"; continuing without company-word filtering.')
+        return rejected_jobs, blacklisted_companies, jobs_top_card or driver.find_element(By.TAG_NAME, "body")
+
     skip_checking = False
     for word in about_company_good_words:
-        if word.lower() in about_company:
+        if word.lower() in about_company_org.lower():
             print_lg(f'Found the word "{word}". So, skipped checking for blacklist words.')
             skip_checking = True
             break
@@ -542,10 +624,7 @@ def check_blacklist(rejected_jobs: set, job_id: str, company: str, blacklisted_c
             rejected_jobs.add(job_id)
             blacklisted_companies.add(company)
             raise ValueError(f'\n"{about_company_org}"\n\nContains "{word}".')
-    buffer(click_gap)
-    scroll_to_view(driver, jobs_top_card)
-    return rejected_jobs, blacklisted_companies, jobs_top_card
-
+    return rejected_jobs, blacklisted_companies, jobs_top_card or driver.find_element(By.TAG_NAME, "body")
 
 
 # Function to extract years of experience required from About Job
@@ -586,7 +665,18 @@ def get_job_description(
     skipMessage = None
     try:
         found_masters = 0
-        jobDescription = find_by_class(driver, "jobs-box__html-content").text
+        # New 2026 UI: About the job has a stable semantic component key.
+        about_job = None
+        try:
+            about_job = WebDriverWait(driver, 6).until(EC.presence_of_element_located(
+                (By.XPATH, '//*[starts-with(@componentkey,"JobDetails_AboutTheJob_")]')))
+        except Exception:
+            pass
+        if about_job:
+            expandable = try_xp(about_job, './/*[@data-testid="expandable-text-box"]', False)
+            jobDescription = (expandable or about_job).text
+        else:
+            jobDescription = find_by_class(driver, "jobs-box__html-content").text
         jobDescriptionLow = jobDescription.lower()
         bad_word = find_bad_word(jobDescription, bad_words)
         if bad_word:
@@ -1028,6 +1118,7 @@ submit_button_xpath = './/button[@aria-label="Submit application" or normalize-s
 # Whatever matches is clicked and then confirmed by the Easy Apply modal actually opening; a
 # new browser tab instead means the job was external.
 easy_apply_locators = [
+    ("2026 Flagship aria-label", '//button[@aria-label="Easy Apply to this job"]'),
     ("apply button id", ".//button[@id='jobs-apply-button-id']"),
     # ponytail: not seen in the captured DOM, kept as a cheap extra shot before the classes.
     ("in-app apply URL flag", ".//a[contains(@href, 'openSDUIApplyFlow=true')]"),
@@ -1035,6 +1126,20 @@ easy_apply_locators = [
     ("button label", ".//button[contains(@class,'jobs-apply-button')][.//span[contains(normalize-space(.), 'Easy Apply')]]"),
     ("apply button", apply_button_xpath),
 ]
+
+
+def get_easy_apply_modal(timeout: float = 3.0) -> WebElement:
+    """Return the visible Easy Apply dialog in legacy or 2026 Flagship LinkedIn UI."""
+    def _find(d):
+        candidates = d.find_elements(By.XPATH, '//div[contains(@class,"jobs-easy-apply-modal")] | //dialog[@data-testid="dialog" and @open]')
+        for candidate in candidates:
+            try:
+                if candidate.is_displayed():
+                    return candidate
+            except Exception:
+                pass
+        return False
+    return WebDriverWait(driver, timeout).until(_find)
 
 
 def follow_company(modal: WebDriver = driver) -> None:
@@ -1122,8 +1227,11 @@ discard_button_xpath = ".//button[@data-control-name='discard_application_confir
 
 def easy_apply_modal_is_open() -> bool:
     '''True while an Easy Apply modal is still on screen and swallowing every click.'''
-    try: return any(m.is_displayed() for m in driver.find_elements(By.CLASS_NAME, "jobs-easy-apply-modal"))
-    except Exception: return False
+    try:
+        candidates = driver.find_elements(By.XPATH, '//div[contains(@class,"jobs-easy-apply-modal")] | //dialog[@data-testid="dialog" and @open]')
+        return any(m.is_displayed() for m in candidates)
+    except Exception:
+        return False
 
 # Function to discard the job application
 def discard_job() -> None:
@@ -1136,7 +1244,7 @@ def discard_job() -> None:
     dialog animation (2s was too short), click Discard, and verify the modal is gone.
     ESCAPE stays as the fallback.
     '''
-    for dismiss in (lambda: try_xp(driver, ".//button[@data-test-modal-close-btn]"),
+    for dismiss in (lambda: try_xp(driver, '//button[@data-test-modal-close-btn or @aria-label="Dismiss" or @aria-label="Close"] | //dialog[@data-testid="dialog"]//button[contains(@aria-label,"Dismiss") or contains(@aria-label,"Close")]'),
                     lambda: actions.send_keys(Keys.ESCAPE).perform()):
         try: dismiss()
         except Exception as e: logger.warning("Couldn't dismiss the application modal. %s", e)
@@ -1179,7 +1287,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
         try:
             while current_count < switch_number:
                 # Wait until job listings are loaded
-                wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
+                wait.until(EC.presence_of_all_elements_located((By.XPATH, job_card_xpath)))
 
                 pagination_element, current_page = get_page_info()
 
@@ -1190,7 +1298,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                     # LinkedIn virtualises this list: off-screen <li>s aren't in the DOM yet and
                     # rendered ones go stale as we scroll, so a single snapshot only ever gets
                     # one screenful. Re-query each time instead of holding that snapshot.
-                    job_listings = driver.find_elements(By.XPATH, "//li[@data-occludable-job-id]")
+                    job_listings = driver.find_elements(By.XPATH, job_card_xpath)
                     if job_index >= len(job_listings): break
                     job = job_listings[job_index]
                     job_index += 1
@@ -1311,7 +1419,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                                 driver.switch_to.window(linkedIn_tab)
                                 print_lg(f"A new tab opened ({how}) - external application.")
                                 break
-                            find_by_class(driver, "jobs-easy-apply-modal", 3)
+                            get_easy_apply_modal(3)
                             is_easy_apply = True
                             print_lg(f"Easy Apply detected ({how}).")
                             break
@@ -1327,7 +1435,7 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                             modal = driver
                             try:
                                 errored = ""
-                                modal = find_by_class(driver, "jobs-easy-apply-modal")
+                                modal = get_easy_apply_modal(5)
                                 wait_xp_click(modal, next_button_xpath, 1)
                                 resume = "Previous resume"
                                 next_button = True
